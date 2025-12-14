@@ -257,4 +257,11 @@ def main(page: ft.Page):
     page.add(layout)
     page.overlay.append(overlay_password)
 
-ft.app(target=main)
+import os
+
+ft.app(
+    target=main,
+    view=ft.WEB_BROWSER,
+    host="0.0.0.0",
+    port=int(os.environ.get("PORT", 8000))
+)
