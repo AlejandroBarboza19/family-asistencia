@@ -306,81 +306,93 @@ class ReportesView:
     # ============================================================
     # EXPORTAR
     # ============================================================
-    def exportar_excel_click(self, e):
-        self.preparar_exportacion("excel")
+   # ============================================================
+# EXPORTAR
+# ============================================================
+def exportar_excel_click(self, e):
+    self.preparar_exportacion("excel")
 
-    def exportar_pdf_click(self, e):
-        self.preparar_exportacion("pdf")
+def exportar_pdf_click(self, e):
+    self.preparar_exportacion("pdf")
 
-    def preparar_exportacion(self, tipo):
-        f_inicio = self.f_inicio.value.strip() or None
-        f_fin = self.f_fin.value.strip() or None
-        texto = self.f_texto.value.strip() or None
-        solo_tarde = self.f_tarde.value
+def preparar_exportacion(self, tipo):
+    f_inicio = self.f_inicio.value.strip() or None
+    f_fin = self.f_fin.value.strip() or None
+    texto = self.f_texto.value.strip() or ""
+    solo_tarde = self.f_tarde.value
 
-        filas = database.consultar_asistencias(f_inicio, f_fin, texto, solo_tarde)
+    # Consultar los datos a exportar
+    filas = database.consultar_asistencias(f_inicio, f_fin, texto, solo_tarde)
 
-        self.tipo_exportacion = tipo
+    if not filas:
+        self.mostrar_snackbar("No hay datos para exportar", "#C62828")
+        return
 
-        if tipo == "excel":
-            self.datos_exportacion = [
-                {
-                    "Nombre": r["nombre"],
-                    "Cédula": r["cedula"],
-                    "Fecha": r["fecha"],
-                    "Turno": r["turno"],
-                    "Llegada": r["hora_llegada"] or "-",
-                    "Salida": r["hora_salida"] or "-",
-                    "Horas": r["horas_trabajadas"] or "-",
-                    "Tarde": r["llego_tarde"],
-                }
-                for r in filas
+    self.tipo_exportacion = tipo
+
+    if tipo == "excel":
+        self.datos_exportacion = [
+            {
+                "Nombre": r["nombre"],
+                "Cédula": r["cedula"],
+                "Fecha": r["fecha"],
+                "Turno": r["turno"],
+                "Llegada": r["hora_llegada"] or "-",
+                "Salida": r["hora_salida"] or "-",
+                "Horas": r["horas_trabajadas"] or "-",
+                "Tarde": r["llego_tarde"],
+            }
+            for r in filas
+        ]
+    else:
+        self.datos_exportacion = [
+            [
+                r["nombre"],
+                r["cedula"],
+                r["fecha"],
+                r["turno"],
+                r["hora_llegada"] or "-",
+                r["hora_salida"] or "-",
+                r["horas_trabajadas"] or "-",
+                r["llego_tarde"],
             ]
+            for r in filas
+        ]
+
+    # Abrir explorador de archivos para guardar
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    nombre = f"asistencias_{timestamp}.{ 'xlsx' if tipo=='excel' else 'pdf'}"
+
+    self.file_picker.save_file(
+        dialog_title="Guardar archivo",
+        file_name=nombre,
+        allowed_extensions=["xlsx"] if tipo == "excel" else ["pdf"]
+    )
+    self.page.update()
+
+# ============================================================
+# GUARDAR ARCHIVO
+# ============================================================
+def guardar_archivo_resultado(self, e: ft.FilePickerResultEvent):
+    if not e.path:
+        return
+
+    try:
+        import shutil
+
+        # Generar archivo temporal
+        if self.tipo_exportacion == "excel":
+            temp = exportar_excel(self.datos_exportacion)
         else:
-            self.datos_exportacion = [
-                [
-                    r["nombre"],
-                    r["cedula"],
-                    r["fecha"],
-                    r["turno"],
-                    r["hora_llegada"] or "-",
-                    r["hora_salida"] or "-",
-                    r["horas_trabajadas"] or "-",
-                    r["llego_tarde"],
-                ]
-                for r in filas
-            ]
+            temp = exportar_pdf(self.datos_exportacion)
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        nombre = f"asistencias_{timestamp}.{ 'xlsx' if tipo=='excel' else 'pdf'}"
+        # Mover archivo al path elegido por el usuario
+        shutil.move(temp, e.path)
 
-        self.file_picker.save_file(
-            dialog_title="Guardar archivo",
-            file_name=nombre,
-            allowed_extensions=["xlsx"] if tipo == "excel" else ["pdf"],
-        )
+        self.mostrar_snackbar(f"Archivo guardado en {e.path}", "#2E7D32")
 
-    # ============================================================
-    # GUARDAR ARCHIVO
-    # ============================================================
-    def guardar_archivo_resultado(self, e: ft.FilePickerResultEvent):
-        if not e.path:
-            return
-
-        try:
-            import shutil
-
-            if self.tipo_exportacion == "excel":
-                temp = exportar_excel(self.datos_exportacion)
-            else:
-                temp = exportar_pdf(self.datos_exportacion)
-
-            shutil.move(temp, e.path)
-
-            self.mostrar_snackbar(f"Archivo guardado en {e.path}", "#2E7D32")
-
-        except Exception as ex:
-            self.mostrar_snackbar(f"Error guardando archivo: {str(ex)}", "#C62828")
+    except Exception as ex:
+        self.mostrar_snackbar(f"Error guardando archivo: {str(ex)}", "#C62828")
 
     # ============================================================
     def mostrar_snackbar(self, msg, color):

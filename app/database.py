@@ -1,261 +1,267 @@
 # database.py
-# Manejo de la base de datos SQLite con sistema de turnos mejorado
+# PostgreSQL Railway - Sistema de Asistencia + Login
 
-import sqlite3
-from pathlib import Path
-from typing import List, Optional
+import psycopg2
+import psycopg2.extras
 import datetime
+from typing import List, Optional
+import bcrypt
 
-DB_PATH = Path(__file__).parent / "data.db"
+# =========================
+# CONFIGURACIÓN DATABASE
+# =========================
 
-# Definición de turnos
+DATABASE_URL = "postgresql://postgres:BDgnfVbngAljWYPjXyeKHlXeLtPjcdAq@gondola.proxy.rlwy.net:17526/railway"
+
+# =========================
+# CONEXIÓN
+# =========================
+
+def get_connection():
+    return psycopg2.connect(
+        DATABASE_URL,
+        sslmode="require",
+        cursor_factory=psycopg2.extras.RealDictCursor
+    )
+
+# =========================
+# TURNOS
+# =========================
+
 TURNOS = {
     "DIA": {
         "nombre": "Turno Día",
-        "inicio": "09:00:00",
-        "fin": "16:00:00",
-        "limite_tarde": "09:10:00"
+        "inicio": datetime.time(9, 0, 0),
+        "fin": datetime.time(16, 0, 0),
+        "limite_tarde": datetime.time(9, 10, 0)
     },
     "NOCHE": {
         "nombre": "Turno Noche",
-        "inicio": "16:00:00",
-        "fin": "23:00:00",
-        "limite_tarde": "16:10:00"
+        "inicio": datetime.time(16, 0, 0),
+        "fin": datetime.time(23, 0, 0),
+        "limite_tarde": datetime.time(16, 10, 0)
     }
 }
 
-def detectar_turno_automatico(hora_str: str) -> str:
-    """Detecta automáticamente el turno según la hora de llegada."""
-    hora = datetime.datetime.strptime(hora_str, "%H:%M:%S").time()
-    hora_16 = datetime.time(16, 0, 0)
-    
-    if hora < hora_16:
-        return "DIA"
-    else:
-        return "NOCHE"
+def detectar_turno_automatico(hora: datetime.time) -> str:
+    return "DIA" if hora < datetime.time(16, 0, 0) else "NOCHE"
 
-def get_connection():
-    """Abrir conexión SQLite (archivo persistente)."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+# =========================
+# CREACIÓN DE TABLAS
+# =========================
 
 def initialize_database():
-    """Crear archivo y tablas si no existen."""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = get_connection()
-    c = conn.cursor()
-    
-    # Tabla empleados
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS empleados (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nombre TEXT NOT NULL,
-        cedula TEXT UNIQUE NOT NULL,
-        numero TEXT,
-        activo INTEGER DEFAULT 1
-    );
+    cur = conn.cursor()
+
+    # EMPLEADOS
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS empleados (
+            id SERIAL PRIMARY KEY,
+            nombre TEXT NOT NULL,
+            cedula TEXT UNIQUE NOT NULL,
+            numero TEXT,
+            activo BOOLEAN DEFAULT TRUE
+        );
     """)
-    
-    # Tabla asistencias
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS asistencias (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        empleado_id INTEGER NOT NULL,
-        fecha TEXT NOT NULL,
-        hora_llegada TEXT,
-        hora_salida TEXT,
-        turno TEXT NOT NULL,
-        llego_tarde TEXT DEFAULT 'NO',
-        horas_trabajadas TEXT,
-        FOREIGN KEY (empleado_id) REFERENCES empleados(id)
-    );
+
+    # ASISTENCIAS
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS asistencias (
+            id SERIAL PRIMARY KEY,
+            empleado_id INTEGER REFERENCES empleados(id) ON DELETE CASCADE,
+            fecha DATE NOT NULL,
+            hora_llegada TIME,
+            hora_salida TIME,
+            turno TEXT NOT NULL,
+            llego_tarde TEXT DEFAULT 'NO',
+            horas_trabajadas TEXT
+        );
     """)
-    
+
+    # USUARIOS (LOGIN)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(50) UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            rol VARCHAR(20) NOT NULL,
+            activo BOOLEAN DEFAULT TRUE,
+            creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+
     conn.commit()
+    cur.close()
     conn.close()
 
-# ---------- CRUD Empleados ----------
+# =========================
+# USUARIOS (LOGIN)
+# =========================
+
+def crear_usuario(username: str, password: str, rol: str):
+    password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO usuarios (username, password_hash, rol)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (username) DO NOTHING;
+    """, (username, password_hash, rol))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+def autenticar_usuario(username: str, password: str) -> Optional[dict]:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT id, username, password_hash, rol
+        FROM usuarios
+        WHERE username = %s AND activo = TRUE
+    """, (username,))
+
+    user = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if not user:
+        return None
+
+    if bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
+        return {
+            "id": user["id"],
+            "username": user["username"],
+            "rol": user["rol"]
+        }
+
+    return None
+
+# =========================
+# CRUD EMPLEADOS
+# =========================
+
 def crear_empleado(nombre: str, cedula: str, numero: str = "") -> int:
     conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO empleados (nombre, cedula, numero) VALUES (?, ?, ?)",
-                  (nombre.strip(), cedula.strip(), numero.strip()))
-        conn.commit()
-        emp_id = c.lastrowid
-    except sqlite3.IntegrityError:
-        c.execute("SELECT id FROM empleados WHERE cedula = ?", (cedula.strip(),))
-        row = c.fetchone()
-        emp_id = row["id"] if row else None
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO empleados (nombre, cedula, numero)
+        VALUES (%s, %s, %s)
+        RETURNING id
+    """, (nombre.strip(), cedula.strip(), numero.strip()))
+
+    emp_id = cur.fetchone()["id"]
+    conn.commit()
+    cur.close()
     conn.close()
+
     return emp_id
 
-def actualizar_empleado(emp_id: int, nombre: str, cedula: str, numero: str) -> bool:
+def obtener_empleados() -> List[dict]:
     conn = get_connection()
-    c = conn.cursor()
-    c.execute("UPDATE empleados SET nombre = ?, cedula = ?, numero = ? WHERE id = ?",
-              (nombre.strip(), cedula.strip(), numero.strip(), emp_id))
-    conn.commit()
-    affected = c.rowcount
-    conn.close()
-    return affected > 0
+    cur = conn.cursor()
 
-def eliminar_empleado(emp_id: int) -> bool:
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM asistencias WHERE empleado_id = ?", (emp_id,))
-    c.execute("DELETE FROM empleados WHERE id = ?", (emp_id,))
-    conn.commit()
-    affected = c.rowcount
-    conn.close()
-    return affected > 0
+    cur.execute("""
+        SELECT id, nombre, cedula, numero
+        FROM empleados
+        WHERE activo = TRUE
+        ORDER BY nombre
+    """)
 
-def obtener_empleados() -> List[sqlite3.Row]:
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT id, nombre, cedula, numero FROM empleados WHERE activo = 1 ORDER BY nombre COLLATE NOCASE")
-    rows = c.fetchall()
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     return rows
 
-def obtener_empleado_por_cedula(cedula: str) -> Optional[sqlite3.Row]:
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM empleados WHERE cedula = ? AND activo = 1", (cedula.strip(),))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-def obtener_empleado_por_id(emp_id: int) -> Optional[sqlite3.Row]:
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM empleados WHERE id = ?", (emp_id,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-# ---------- Sistema de Marcación con Turnos ----------
-def obtener_asistencia_hoy(empleado_id: int) -> Optional[sqlite3.Row]:
-    """Verifica si el empleado ya tiene registro hoy."""
-    hoy = datetime.date.today().strftime("%Y-%m-%d")
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM asistencias WHERE empleado_id = ? AND fecha = ?", (empleado_id, hoy))
-    row = c.fetchone()
-    conn.close()
-    return row
+# =========================
+# MARCACIONES
+# =========================
 
 def registrar_llegada(empleado_id: int) -> dict:
-    """Registra la hora de llegada del empleado con detección automática de turno."""
     ahora = datetime.datetime.now()
-    fecha = ahora.strftime("%Y-%m-%d")
-    hora = ahora.strftime("%H:%M:%S")
-    
-    # Detectar turno automáticamente
+    fecha = ahora.date()
+    hora = ahora.time()
+
     turno_key = detectar_turno_automatico(hora)
-    turno_info = TURNOS[turno_key]
-    
-    # Determinar si llegó tarde según el turno
-    limite_tarde = turno_info["limite_tarde"]
-    llego_tarde = "SI" if hora > limite_tarde else "NO"
-    
+    turno = TURNOS[turno_key]
+    llego_tarde = "SI" if hora > turno["limite_tarde"] else "NO"
+
     conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO asistencias (empleado_id, fecha, hora_llegada, turno, llego_tarde)
-        VALUES (?, ?, ?, ?, ?)
-    """, (empleado_id, fecha, hora, turno_info["nombre"], llego_tarde))
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO asistencias
+        (empleado_id, fecha, hora_llegada, turno, llego_tarde)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (empleado_id, fecha, hora, turno["nombre"], llego_tarde))
+
     conn.commit()
+    cur.close()
     conn.close()
-    
+
     return {
-        "fecha": fecha,
-        "hora": hora,
-        "tipo": "LLEGADA",
-        "turno": turno_info["nombre"],
+        "fecha": str(fecha),
+        "hora": hora.strftime("%H:%M:%S"),
+        "turno": turno["nombre"],
         "tarde": llego_tarde
     }
 
-def registrar_salida(empleado_id: int) -> dict:
-    """Registra la hora de salida del empleado."""
-    hoy = datetime.date.today().strftime("%Y-%m-%d")
-    ahora = datetime.datetime.now()
-    hora_salida = ahora.strftime("%H:%M:%S")
-    
-    conn = get_connection()
-    c = conn.cursor()
-    
-    # Obtener registro de hoy
-    c.execute("SELECT * FROM asistencias WHERE empleado_id = ? AND fecha = ?", (empleado_id, hoy))
-    registro = c.fetchone()
-    
-    if registro and registro["hora_llegada"]:
-        # Calcular horas trabajadas
-        hora_llegada = datetime.datetime.strptime(registro["hora_llegada"], "%H:%M:%S")
-        hora_sal = datetime.datetime.strptime(hora_salida, "%H:%M:%S")
-        delta = hora_sal - hora_llegada
-        horas_trabajadas = str(delta).split('.')[0]
-        
-        # Actualizar registro
-        c.execute("""
-            UPDATE asistencias 
-            SET hora_salida = ?, horas_trabajadas = ?
-            WHERE id = ?
-        """, (hora_salida, horas_trabajadas, registro["id"]))
-        conn.commit()
-        conn.close()
-        
-        return {"fecha": hoy, "hora": hora_salida, "tipo": "SALIDA", "horas": horas_trabajadas}
-    
-    conn.close()
-    return None
+# =========================
+# CONSULTAR ASISTENCIAS CON FILTROS
+# =========================
 
-# ---------- Consultas para reportes ----------
-def consultar_asistencias(f_inicio: str = None, f_fin: str = None,
-                          filtro_texto: str = None, solo_tarde: bool = False) -> List[sqlite3.Row]:
-    """Devuelve asistencias con los datos del empleado."""
-    conn = get_connection()
-    c = conn.cursor()
-    sql = """
-    SELECT 
-        a.id, 
-        e.nombre, 
-        e.cedula, 
-        a.fecha, 
-        a.hora_llegada,
-        a.hora_salida,
-        a.horas_trabajadas,
-        a.turno, 
-        a.llego_tarde
-    FROM asistencias a
-    JOIN empleados e ON e.id = a.empleado_id
-    WHERE 1=1
+def consultar_asistencias(
+    f_inicio: str,
+    f_fin: str,
+    texto: str = "",
+    solo_tarde: bool = False
+) -> List[dict]:
     """
-    params = []
-    
-    if f_inicio:
-        sql += " AND fecha >= ?"
-        params.append(f_inicio)
-    if f_fin:
-        sql += " AND fecha <= ?"
-        params.append(f_fin)
-    if filtro_texto:
-        sql += " AND (e.nombre LIKE ? OR e.cedula LIKE ?)"
-        like = f"%{filtro_texto}%"
-        params.extend([like, like])
-    if solo_tarde:
-        sql += " AND a.llego_tarde = 'SI'"
-    
-    sql += " ORDER BY a.fecha DESC, a.hora_llegada DESC"
-    c.execute(sql, tuple(params))
-    rows = c.fetchall()
-    conn.close()
-    return rows
+    Retorna asistencias entre fechas f_inicio y f_fin,
+    filtrando opcionalmente por texto (nombre o cédula) y solo llegadas tarde.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
 
-# Inicializar al importar
-initialize_database()
+    query = """
+        SELECT a.id, e.nombre, e.cedula, a.fecha, a.hora_llegada, a.hora_salida, a.turno, a.llego_tarde, a.horas_trabajadas
+        FROM asistencias a
+        JOIN empleados e ON a.empleado_id = e.id
+        WHERE a.fecha BETWEEN %s AND %s
+    """
+    params = [f_inicio, f_fin]
+
+    if texto:
+        query += " AND (e.nombre ILIKE %s OR e.cedula ILIKE %s)"
+        params += [f"%{texto}%", f"%{texto}%"]
+
+    if solo_tarde:
+        query += " AND a.llego_tarde = 'SI'"
+
+    query += " ORDER BY a.fecha, e.nombre"
+
+    cur.execute(query, params)
+    resultados = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    return resultados
+
+# =========================
+# INICIALIZACIÓN AUTOMÁTICA
+# =========================
 
 if __name__ == "__main__":
-    print("Inicializado DB en:", DB_PATH)
-    print("Turnos configurados:", TURNOS)
+    print("🔄 Inicializando base de datos...")
+    initialize_database()
+
+    print("👤 Creando usuarios por defecto...")
+    crear_usuario("admin", "123456", "admin")
+    crear_usuario("jefe", "654321", "jefe")
+
+    print("✅ Base de datos lista y funcionando")

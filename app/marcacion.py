@@ -1,5 +1,5 @@
-# marcacion_premium.py
-# Pantalla de marcación con diseño premium dark
+# marcacion.py
+# Pantalla de marcación con diseño premium
 
 import flet as ft
 import database
@@ -8,7 +8,7 @@ import threading
 import time
 from diseño_premium import (
     COLORS, GlassCard, PremiumButton, PremiumTextField,
-    PremiumHeader, Badge
+    Badge
 )
 
 class MarcacionView:
@@ -276,33 +276,42 @@ class MarcacionView:
         """Actualiza el badge del turno actual."""
         from database import detectar_turno_automatico, TURNOS
         
-        hora_actual = datetime.now().strftime("%H:%M:%S")
+        # ✅ CORRECTO: Usar datetime.time(), no string
+        hora_actual = datetime.now().time()
         turno_key = detectar_turno_automatico(hora_actual)
         turno_info = TURNOS[turno_key]
         
         if turno_key == "DIA":
             self.turno_badge = Badge(
-                f"TURNO DÍA  {turno_info['inicio'][:5]} - {turno_info['fin'][:5]}",
+                f"TURNO DÍA  {turno_info['inicio'].strftime('%H:%M')} - {turno_info['fin'].strftime('%H:%M')}",
                 color_start=COLORS["warning"],
                 color_end="#FB923C",
                 icon=ft.Icons.WB_SUNNY_ROUNDED,
             )
         else:
             self.turno_badge = Badge(
-                f"TURNO NOCHE  {turno_info['inicio'][:5]} - {turno_info['fin'][:5]}",
+                f"TURNO NOCHE  {turno_info['inicio'].strftime('%H:%M')} - {turno_info['fin'].strftime('%H:%M')}",
                 color_start=COLORS["accent_purple"],
                 color_end=COLORS["accent_blue"],
                 icon=ft.Icons.NIGHTLIGHT_ROUNDED,
             )
     
     def buscar_empleado(self, e):
+        """Busca un empleado por cédula."""
         cedula = (self.cedula_input.value or "").strip()
         
         if not cedula:
-            self.mostrar_snackbar("Por favor ingrese una cédula")
+            self.mostrar_snackbar("⚠️ Por favor ingrese una cédula")
             return
         
-        empleado = database.obtener_empleado_por_cedula(cedula)
+        # Buscar empleado en la base de datos
+        empleados = database.obtener_empleados()
+        empleado = None
+        
+        for emp in empleados:
+            if emp["cedula"] == cedula:
+                empleado = emp
+                break
         
         if not empleado:
             self.mostrar_snackbar("❌ Empleado no encontrado")
@@ -313,6 +322,7 @@ class MarcacionView:
         self.mostrar_info_empleado()
     
     def mostrar_info_empleado(self):
+        """Muestra la información del empleado y opciones de marcación."""
         if not self.empleado_actual:
             return
         
@@ -322,19 +332,34 @@ class MarcacionView:
         
         self.info_empleado.visible = True
         
-        registro_hoy = database.obtener_asistencia_hoy(self.empleado_actual["id"])
+        # Verificar si ya tiene registro hoy
+        conn = database.get_connection()
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT hora_llegada, hora_salida
+            FROM asistencias
+            WHERE empleado_id = %s AND fecha = %s
+        """, (self.empleado_actual["id"], datetime.now().date()))
+        
+        registro_hoy = cur.fetchone()
+        cur.close()
+        conn.close()
         
         if not registro_hoy:
+            # No tiene registro, puede marcar llegada
             self.btn_llegada.visible = True
             self.btn_salida.visible = False
             self.mensaje_estado.content.value = "✨ Bienvenido! Registre su llegada"
             self.mensaje_estado.content.color = COLORS["success"]
         elif registro_hoy["hora_salida"]:
+            # Ya completó la jornada
             self.btn_llegada.visible = False
             self.btn_salida.visible = False
             self.mensaje_estado.content.value = f"✅ Jornada completa\nLlegada: {registro_hoy['hora_llegada']} | Salida: {registro_hoy['hora_salida']}"
             self.mensaje_estado.content.color = COLORS["text_secondary"]
         else:
+            # Ya marcó llegada, puede marcar salida
             self.btn_llegada.visible = False
             self.btn_salida.visible = True
             self.mensaje_estado.content.value = f"⏰ Llegada: {registro_hoy['hora_llegada']}\nAhora puede marcar su salida"
@@ -345,46 +370,73 @@ class MarcacionView:
         self.page.update()
     
     def marcar_llegada(self, e):
+        """Registra la llegada del empleado."""
         if not self.empleado_actual:
             return
         
         resultado = database.registrar_llegada(self.empleado_actual["id"])
         
         if resultado['tarde'] == "SI":
-            mensaje = f"⚠️ Llegada registrada (TARDE)\n{resultado['hora']}"
+            mensaje = f"⚠️ Llegada registrada (TARDE)\n{resultado['hora']} - {resultado['turno']}"
         else:
-            mensaje = f"✅ Llegada registrada\n{resultado['hora']}"
+            mensaje = f"✅ Llegada registrada\n{resultado['hora']} - {resultado['turno']}"
         
         self.mostrar_snackbar(mensaje)
         self.limpiar_formulario()
-        self.on_refresh()
+        if self.on_refresh:
+            self.on_refresh()
     
     def marcar_salida(self, e):
+        """Registra la salida del empleado."""
         if not self.empleado_actual:
             return
         
-        resultado = database.registrar_salida(self.empleado_actual["id"])
+        # Calcular horas trabajadas
+        conn = database.get_connection()
+        cur = conn.cursor()
+        
+        cur.execute("""
+            UPDATE asistencias
+            SET hora_salida = %s
+            WHERE empleado_id = %s AND fecha = %s AND hora_salida IS NULL
+            RETURNING hora_llegada, hora_salida
+        """, (datetime.now().time(), self.empleado_actual["id"], datetime.now().date()))
+        
+        resultado = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
         
         if resultado:
-            mensaje = f"👋 Salida registrada\n{resultado['hora']} | Trabajadas: {resultado['horas']}"
+            # Calcular horas trabajadas
+            llegada = datetime.combine(datetime.now().date(), resultado["hora_llegada"])
+            salida = datetime.combine(datetime.now().date(), resultado["hora_salida"])
+            diferencia = salida - llegada
+            horas = diferencia.total_seconds() / 3600
+            
+            mensaje = f"👋 Salida registrada\n{resultado['hora_salida'].strftime('%H:%M:%S')} | Trabajadas: {horas:.2f}h"
             self.mostrar_snackbar(mensaje)
             self.limpiar_formulario()
-            self.on_refresh()
+            if self.on_refresh:
+                self.on_refresh()
         else:
             self.mostrar_snackbar("❌ Error al registrar salida")
     
     def ocultar_info(self):
+        """Oculta la información del empleado."""
         self.info_empleado.visible = False
         self.botones_accion.visible = False
         self.mensaje_estado.visible = False
         self.page.update()
     
     def limpiar_formulario(self):
+        """Limpia el formulario y resetea el estado."""
         self.cedula_input.value = ""
         self.empleado_actual = None
         self.ocultar_info()
     
     def mostrar_snackbar(self, mensaje):
+        """Muestra un mensaje en el snackbar."""
         self.page.snack_bar.content.value = mensaje
         self.page.snack_bar.open = True
         self.page.update()
