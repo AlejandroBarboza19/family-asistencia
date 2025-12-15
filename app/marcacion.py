@@ -10,6 +10,7 @@ from diseño_premium import (
     COLORS, GlassCard, PremiumButton, PremiumTextField,
     PremiumHeader, Badge
 )
+from zoneinfo import ZoneInfo
 
 class MarcacionView:
     def __init__(self, page, on_refresh_callback):
@@ -176,7 +177,7 @@ class MarcacionView:
                  "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
         dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
         
-        ahora = datetime.now()
+        ahora = datetime.now(ZoneInfo("America/Bogota"))
         dia_semana = dias[ahora.weekday()]
         mes = meses[ahora.month - 1]
         
@@ -262,7 +263,7 @@ class MarcacionView:
         def actualizar():
             while self.reloj_activo:
                 try:
-                    self.reloj.content.value = datetime.now().strftime("%H:%M:%S")
+                    self.reloj.content.value = datetime.now(ZoneInfo("America/Bogota")).strftime("%H:%M:%S")
                     self.actualizar_turno()
                     self.page.update()
                 except:

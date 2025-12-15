@@ -4,7 +4,8 @@
 import sqlite3
 from pathlib import Path
 from typing import List, Optional
-import datetime
+from datetime import datetime, date, time
+from zoneinfo import ZoneInfo
 
 DB_PATH = Path(__file__).parent / "data.db"
 
@@ -26,13 +27,9 @@ TURNOS = {
 
 def detectar_turno_automatico(hora_str: str) -> str:
     """Detecta automáticamente el turno según la hora de llegada."""
-    hora = datetime.datetime.strptime(hora_str, "%H:%M:%S").time()
-    hora_16 = datetime.time(16, 0, 0)
-    
-    if hora < hora_16:
-        return "DIA"
-    else:
-        return "NOCHE"
+    h = datetime.strptime(hora_str, "%H:%M:%S").time()
+    hora_16 = time(16, 0, 0)
+    return "DIA" if h < hora_16 else "NOCHE"
 
 def get_connection():
     """Abrir conexión SQLite (archivo persistente)."""
@@ -138,7 +135,7 @@ def obtener_empleado_por_id(emp_id: int) -> Optional[sqlite3.Row]:
 # ---------- Sistema de Marcación con Turnos ----------
 def obtener_asistencia_hoy(empleado_id: int) -> Optional[sqlite3.Row]:
     """Verifica si el empleado ya tiene registro hoy."""
-    hoy = datetime.date.today().strftime("%Y-%m-%d")
+    hoy = date.today().strftime("%Y-%m-%d")
     conn = get_connection()
     c = conn.cursor()
     c.execute("SELECT * FROM asistencias WHERE empleado_id = ? AND fecha = ?", (empleado_id, hoy))
@@ -148,18 +145,16 @@ def obtener_asistencia_hoy(empleado_id: int) -> Optional[sqlite3.Row]:
 
 def registrar_llegada(empleado_id: int) -> dict:
     """Registra la hora de llegada del empleado con detección automática de turno."""
-    ahora = datetime.datetime.now()
+    ahora = datetime.now(ZoneInfo("America/Bogota"))
     fecha = ahora.strftime("%Y-%m-%d")
     hora = ahora.strftime("%H:%M:%S")
     
-    # Detectar turno automáticamente
     turno_key = detectar_turno_automatico(hora)
     turno_info = TURNOS[turno_key]
-    
-    # Determinar si llegó tarde según el turno
+
     limite_tarde = turno_info["limite_tarde"]
     llego_tarde = "SI" if hora > limite_tarde else "NO"
-    
+
     conn = get_connection()
     c = conn.cursor()
     c.execute("""
@@ -168,7 +163,7 @@ def registrar_llegada(empleado_id: int) -> dict:
     """, (empleado_id, fecha, hora, turno_info["nombre"], llego_tarde))
     conn.commit()
     conn.close()
-    
+
     return {
         "fecha": fecha,
         "hora": hora,
@@ -179,25 +174,21 @@ def registrar_llegada(empleado_id: int) -> dict:
 
 def registrar_salida(empleado_id: int) -> dict:
     """Registra la hora de salida del empleado."""
-    hoy = datetime.date.today().strftime("%Y-%m-%d")
-    ahora = datetime.datetime.now()
+    hoy = date.today().strftime("%Y-%m-%d")
+    ahora = datetime.now(ZoneInfo("America/Bogota"))
     hora_salida = ahora.strftime("%H:%M:%S")
-    
+
     conn = get_connection()
     c = conn.cursor()
-    
-    # Obtener registro de hoy
     c.execute("SELECT * FROM asistencias WHERE empleado_id = ? AND fecha = ?", (empleado_id, hoy))
     registro = c.fetchone()
-    
+
     if registro and registro["hora_llegada"]:
-        # Calcular horas trabajadas
-        hora_llegada = datetime.datetime.strptime(registro["hora_llegada"], "%H:%M:%S")
-        hora_sal = datetime.datetime.strptime(hora_salida, "%H:%M:%S")
+        hora_llegada = datetime.strptime(registro["hora_llegada"], "%H:%M:%S")
+        hora_sal = datetime.strptime(hora_salida, "%H:%M:%S")
         delta = hora_sal - hora_llegada
         horas_trabajadas = str(delta).split('.')[0]
-        
-        # Actualizar registro
+
         c.execute("""
             UPDATE asistencias 
             SET hora_salida = ?, horas_trabajadas = ?
@@ -205,9 +196,9 @@ def registrar_salida(empleado_id: int) -> dict:
         """, (hora_salida, horas_trabajadas, registro["id"]))
         conn.commit()
         conn.close()
-        
+
         return {"fecha": hoy, "hora": hora_salida, "tipo": "SALIDA", "horas": horas_trabajadas}
-    
+
     conn.close()
     return None
 
@@ -233,7 +224,7 @@ def consultar_asistencias(f_inicio: str = None, f_fin: str = None,
     WHERE 1=1
     """
     params = []
-    
+
     if f_inicio:
         sql += " AND fecha >= ?"
         params.append(f_inicio)
@@ -246,7 +237,7 @@ def consultar_asistencias(f_inicio: str = None, f_fin: str = None,
         params.extend([like, like])
     if solo_tarde:
         sql += " AND a.llego_tarde = 'SI'"
-    
+
     sql += " ORDER BY a.fecha DESC, a.hora_llegada DESC"
     c.execute(sql, tuple(params))
     rows = c.fetchall()
