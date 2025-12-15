@@ -147,10 +147,11 @@ class MarcacionView:
             ),
         )
         
-        # Reloj con gradiente
+        # Reloj con gradiente - CORREGIDO: usar ZoneInfo desde el inicio
+        ahora_bogota = datetime.now(ZoneInfo("America/Bogota"))
         self.reloj = ft.Container(
             content=ft.Text(
-                datetime.now().strftime("%H:%M:%S"),
+                ahora_bogota.strftime("%H:%M:%S"),
                 size=56,
                 weight=ft.FontWeight.BOLD,
                 color=COLORS["text_primary"],
@@ -172,17 +173,16 @@ class MarcacionView:
         # Indicador de turno
         self.turno_badge = Badge("", icon=ft.Icons.WB_SUNNY_ROUNDED)
         
-        # Fecha en español
+        # Fecha en español - CORREGIDO: usar ahora_bogota
         meses = ["enero", "febrero", "marzo", "abril", "mayo", "junio",
                  "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
         dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
         
-        ahora = datetime.now(ZoneInfo("America/Bogota"))
-        dia_semana = dias[ahora.weekday()]
-        mes = meses[ahora.month - 1]
+        dia_semana = dias[ahora_bogota.weekday()]
+        mes = meses[ahora_bogota.month - 1]
         
         self.fecha = ft.Text(
-            f"{dia_semana}, {ahora.day} de {mes} de {ahora.year}",
+            f"{dia_semana}, {ahora_bogota.day} de {mes} de {ahora_bogota.year}",
             size=16,
             color=COLORS["text_secondary"],
         )
@@ -263,7 +263,9 @@ class MarcacionView:
         def actualizar():
             while self.reloj_activo:
                 try:
-                    self.reloj.content.value = datetime.now(ZoneInfo("America/Bogota")).strftime("%H:%M:%S")
+                    # CORREGIDO: usar ZoneInfo en cada actualización
+                    ahora_bogota = datetime.now(ZoneInfo("America/Bogota"))
+                    self.reloj.content.value = ahora_bogota.strftime("%H:%M:%S")
                     self.actualizar_turno()
                     self.page.update()
                 except:
@@ -277,24 +279,57 @@ class MarcacionView:
         """Actualiza el badge del turno actual."""
         from database import detectar_turno_automatico, TURNOS
         
-        hora_actual = datetime.now().strftime("%H:%M:%S")
+        # CORREGIDO: Hora actual en Bogotá
+        ahora_bogota = datetime.now(ZoneInfo("America/Bogota"))
+        hora_actual = ahora_bogota.strftime("%H:%M:%S")
+        
+        # Detectar turno
         turno_key = detectar_turno_automatico(hora_actual)
         turno_info = TURNOS[turno_key]
         
+        # Obtener el Row que contiene el icono y el texto
+        badge_row = self.turno_badge.content
+        
+        # Actualizar icono (primer elemento del Row)
         if turno_key == "DIA":
-            self.turno_badge = Badge(
-                f"TURNO DÍA  {turno_info['inicio'][:5]} - {turno_info['fin'][:5]}",
-                color_start=COLORS["warning"],
-                color_end="#FB923C",
-                icon=ft.Icons.WB_SUNNY_ROUNDED,
+            badge_row.controls[0] = ft.Icon(ft.Icons.WB_SUNNY_ROUNDED, size=18, color="#FFF")
+        else:
+            badge_row.controls[0] = ft.Icon(ft.Icons.NIGHTLIGHT_ROUNDED, size=18, color="#FFF")
+        
+        # Actualizar texto (segundo elemento del Row)
+        badge_row.controls[1].value = f"TURNO {'DÍA' if turno_key=='DIA' else 'NOCHE'}  {turno_info['inicio'][:5]} - {turno_info['fin'][:5]}"
+        
+        # Actualizar gradiente y sombra del Container
+        if turno_key == "DIA":
+            # Turno día - Naranja con sol
+            self.turno_badge.gradient = ft.LinearGradient(
+                begin=ft.alignment.Alignment(-1, 0),
+                end=ft.alignment.Alignment(1, 0),
+                colors=["#FF8C42", "#FFB74D"],
+            )
+            self.turno_badge.shadow = ft.BoxShadow(
+                spread_radius=0,
+                blur_radius=15,
+                color="#FF8C4250",
+                offset=ft.Offset(0, 4),
             )
         else:
-            self.turno_badge = Badge(
-                f"TURNO NOCHE  {turno_info['inicio'][:5]} - {turno_info['fin'][:5]}",
-                color_start=COLORS["accent_purple"],
-                color_end=COLORS["accent_blue"],
-                icon=ft.Icons.NIGHTLIGHT_ROUNDED,
+            # Turno noche - Azul con luna
+            self.turno_badge.gradient = ft.LinearGradient(
+                begin=ft.alignment.Alignment(-1, 0),
+                end=ft.alignment.Alignment(1, 0),
+                colors=["#4A5AFF", "#6C7FFF"],
             )
+            self.turno_badge.shadow = ft.BoxShadow(
+                spread_radius=0,
+                blur_radius=15,
+                color="#4A5AFF50",
+                offset=ft.Offset(0, 4),
+            )
+        
+        # Refrescar la página
+        self.page.update()
+
     
     def buscar_empleado(self, e):
         cedula = (self.cedula_input.value or "").strip()

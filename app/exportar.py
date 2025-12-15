@@ -1,7 +1,7 @@
 # exportar.py
-# Funciones para exportar a Excel y PDF
+# Funciones para exportar a Excel y PDF - Compatible con Web
 
-from pathlib import Path
+from io import BytesIO
 import pandas as pd
 import datetime
 from diseño_premium import COLORS
@@ -18,38 +18,36 @@ from reportlab.platypus import (
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 
-# Carpeta de exportaciones
-OUTPUT_DIR = Path(__file__).parent / "exports"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-
-def exportar_excel(data: list) -> str:
+def exportar_excel(data: list) -> bytes:
     """
     Exporta asistencias a Excel usando pandas.
+    Retorna bytes directamente para descarga web.
     data: lista de dicts con las nuevas columnas.
     """
     columnas = ["Nombre", "Cédula", "Fecha", "Turno", "Llegada", "Salida", "Horas", "Tarde"]
 
     df = pd.DataFrame(data if data else [], columns=columnas)
 
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = OUTPUT_DIR / f"asistencias_{ts}.xlsx"
+    # Crear buffer en memoria
+    buffer = BytesIO()
+    df.to_excel(buffer, index=False, engine='openpyxl')
+    buffer.seek(0)
+    
+    return buffer.getvalue()
 
-    df.to_excel(path, index=False, engine='openpyxl')
 
-    return str(path)
-
-
-def exportar_pdf(data: list) -> str:
+def exportar_pdf(data: list) -> bytes:
     """
     Exporta asistencias a PDF (formato horizontal).
+    Retorna bytes directamente para descarga web.
     data: lista de filas [Nombre, Cédula, Fecha, Turno, Llegada, Salida, Horas, Tarde]
     """
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = OUTPUT_DIR / f"asistencias_{ts}.pdf"
+    # Crear buffer en memoria
+    buffer = BytesIO()
 
     doc = SimpleDocTemplate(
-        str(path),
+        buffer,
         pagesize=landscape(letter),
         rightMargin=20,
         leftMargin=20,
@@ -121,5 +119,6 @@ def exportar_pdf(data: list) -> str:
     flow.append(pie)
     
     doc.build(flow)
-
-    return str(path)
+    
+    buffer.seek(0)
+    return buffer.getvalue()
