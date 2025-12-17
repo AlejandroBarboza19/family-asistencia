@@ -1,10 +1,11 @@
 # database.py
 # Manejo de la base de datos PostgreSQL con sistema de turnos mejorado
+# Soporta turnos nocturnos que cruzan medianoche
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from typing import List, Optional, Dict
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 from zoneinfo import ZoneInfo
 import os
 
@@ -20,13 +21,15 @@ TURNOS = {
         "nombre": "Turno Día",
         "inicio": "09:00:00",
         "fin": "16:00:00",
-        "limite_tarde": "09:10:00"
+        "limite_tarde": "09:10:00",
+        "cruza_medianoche": False
     },
     "NOCHE": {
         "nombre": "Turno Noche",
         "inicio": "16:00:00",
-        "fin": "23:00:00",
-        "limite_tarde": "16:10:00"
+        "fin": "23:59:59",  # Puede extenderse hasta después de medianoche
+        "limite_tarde": "16:10:00",
+        "cruza_medianoche": True
     }
 }
 
@@ -67,6 +70,7 @@ def initialize_database():
         turno TEXT NOT NULL,
         llego_tarde TEXT DEFAULT 'NO',
         horas_trabajadas TEXT,
+        turno_completado BOOLEAN DEFAULT FALSE,
         FOREIGN KEY (empleado_id) REFERENCES empleados(id)
     );
     """)
@@ -81,6 +85,16 @@ def initialize_database():
     CREATE INDEX IF NOT EXISTS idx_empleados_cedula 
     ON empleados(cedula);
     """)
+    
+    # Agregar columna turno_completado si no existe
+    try:
+        c.execute("""
+        ALTER TABLE asistencias 
+        ADD COLUMN IF NOT EXISTS turno_completado BOOLEAN DEFAULT FALSE;
+        """)
+        conn.commit()
+    except:
+        conn.rollback()
     
     conn.commit()
     conn.close()
@@ -162,17 +176,48 @@ def obtener_empleado_por_id(emp_id: int) -> Optional[Dict]:
 
 # ---------- Sistema de Marcación con Turnos ----------
 def obtener_asistencia_hoy(empleado_id: int) -> Optional[Dict]:
-    """Verifica si el empleado ya tiene registro hoy."""
-    hoy = date.today()
+    """
+    Verifica si el empleado tiene registro activo (hoy o ayer sin completar).
+    Esto permite que turnos nocturnos marquen salida después de medianoche.
+    """
+    ahora = datetime.now(ZoneInfo("America/Bogota"))
+    hoy = ahora.date()
+    ayer = hoy - timedelta(days=1)
+    
     conn = get_connection()
     c = conn.cursor()
+    
+    # Primero buscar registro de hoy
     c.execute("""
         SELECT * FROM asistencias 
         WHERE empleado_id = %s AND fecha = %s
+        ORDER BY id DESC LIMIT 1
     """, (empleado_id, hoy))
-    row = c.fetchone()
+    registro_hoy = c.fetchone()
+    
+    # Si hay registro de hoy, retornarlo
+    if registro_hoy:
+        conn.close()
+        return dict(registro_hoy)
+    
+    # Si es antes de las 6 AM, buscar turno de ayer sin completar (turno nocturno)
+    if ahora.hour < 6:
+        c.execute("""
+            SELECT * FROM asistencias 
+            WHERE empleado_id = %s 
+            AND fecha = %s 
+            AND turno_completado = FALSE
+            AND hora_salida IS NULL
+            ORDER BY id DESC LIMIT 1
+        """, (empleado_id, ayer))
+        registro_ayer = c.fetchone()
+        
+        if registro_ayer:
+            conn.close()
+            return dict(registro_ayer)
+    
     conn.close()
-    return dict(row) if row else None
+    return None
 
 def registrar_llegada(empleado_id: int) -> dict:
     """Registra la hora de llegada del empleado con detección automática de turno."""
@@ -190,8 +235,8 @@ def registrar_llegada(empleado_id: int) -> dict:
     conn = get_connection()
     c = conn.cursor()
     c.execute("""
-        INSERT INTO asistencias (empleado_id, fecha, hora_llegada, turno, llego_tarde)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO asistencias (empleado_id, fecha, hora_llegada, turno, llego_tarde, turno_completado)
+        VALUES (%s, %s, %s, %s, %s, FALSE)
     """, (empleado_id, fecha, hora, turno_info["nombre"], llego_tarde))
     conn.commit()
     conn.close()
@@ -205,40 +250,69 @@ def registrar_llegada(empleado_id: int) -> dict:
     }
 
 def registrar_salida(empleado_id: int) -> dict:
-    """Registra la hora de salida del empleado."""
-    hoy = date.today()
+    """
+    Registra la hora de salida del empleado.
+    Permite salidas después de medianoche para turnos nocturnos.
+    """
     ahora = datetime.now(ZoneInfo("America/Bogota"))
+    hoy = ahora.date()
+    ayer = hoy - timedelta(days=1)
     hora_salida = ahora.time()
     hora_salida_str = hora_salida.strftime("%H:%M:%S")
 
     conn = get_connection()
     c = conn.cursor()
+    
+    # Buscar registro activo (hoy o ayer si es madrugada)
+    registro = None
+    
+    # Primero buscar en hoy
     c.execute("""
         SELECT * FROM asistencias 
         WHERE empleado_id = %s AND fecha = %s
+        ORDER BY id DESC LIMIT 1
     """, (empleado_id, hoy))
     registro = c.fetchone()
+    
+    # Si es madrugada (antes de las 6 AM) y no hay registro hoy, buscar ayer
+    if not registro and ahora.hour < 6:
+        c.execute("""
+            SELECT * FROM asistencias 
+            WHERE empleado_id = %s 
+            AND fecha = %s 
+            AND turno_completado = FALSE
+            AND hora_salida IS NULL
+            ORDER BY id DESC LIMIT 1
+        """, (empleado_id, ayer))
+        registro = c.fetchone()
 
     if registro and registro["hora_llegada"]:
-        # PostgreSQL maneja TIME automáticamente
         hora_llegada = registro["hora_llegada"]
+        fecha_registro = registro["fecha"]
         
         # Convertir a datetime para calcular diferencia
-        hora_llegada_dt = datetime.combine(hoy, hora_llegada)
-        hora_salida_dt = datetime.combine(hoy, hora_salida)
-        delta = hora_salida_dt - hora_llegada_dt
+        fecha_llegada_dt = datetime.combine(fecha_registro, hora_llegada)
+        
+        # Si la salida es al día siguiente (después de medianoche)
+        if ahora.date() > fecha_registro:
+            fecha_salida_dt = datetime.combine(ahora.date(), hora_salida)
+        else:
+            fecha_salida_dt = datetime.combine(fecha_registro, hora_salida)
+        
+        # Calcular horas trabajadas
+        delta = fecha_salida_dt - fecha_llegada_dt
         horas_trabajadas = str(delta).split('.')[0]
 
         c.execute("""
             UPDATE asistencias 
-            SET hora_salida = %s, horas_trabajadas = %s
+            SET hora_salida = %s, horas_trabajadas = %s, turno_completado = TRUE
             WHERE id = %s
         """, (hora_salida, horas_trabajadas, registro["id"]))
         conn.commit()
         conn.close()
 
         return {
-            "fecha": hoy.strftime("%Y-%m-%d"),
+            "fecha": fecha_registro.strftime("%Y-%m-%d"),
             "hora": hora_salida_str,
             "tipo": "SALIDA",
             "horas": horas_trabajadas
@@ -263,7 +337,8 @@ def consultar_asistencias(f_inicio: str = None, f_fin: str = None,
         a.hora_salida,
         a.horas_trabajadas,
         a.turno, 
-        a.llego_tarde
+        a.llego_tarde,
+        a.turno_completado
     FROM asistencias a
     JOIN empleados e ON e.id = a.empleado_id
     WHERE 1=1
@@ -297,5 +372,6 @@ except Exception as e:
     print(f"❌ Error al inicializar la base de datos: {e}")
 
 if __name__ == "__main__":
-    print("Conexión PostgreSQL:", DATABASE_URL.split('@')[1])  # Oculta credenciales
+    print("Conexión PostgreSQL configurada")
     print("Turnos configurados:", TURNOS)
+    print("Soporte para turnos nocturnos: ✅")
